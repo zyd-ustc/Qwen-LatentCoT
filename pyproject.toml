@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qwen-latent-cot"
+version = "0.1.0"
+description = "Qwen-LatentCoT: latent visual CoT training and inference pipeline"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "torch>=2.1",
+  "transformers>=4.56.0",
+  "datasets>=2.18.0",
+  "Pillow>=10.0.0",
+  "PyYAML>=6.0",
+  "tqdm>=4.66.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+]
+
+[project.scripts]
+qwen-latent-cot = "qwen_latent_cot.cli:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["qwen_latent_cot*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

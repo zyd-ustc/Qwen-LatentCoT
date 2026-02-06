@@ -1,0 +1,7 @@
+prompt: "A cozy wooden cabin in snowy mountains at sunrise"
+output_dir: "./outputs/infer_demo"
+backend: "mock"
+reflector: "heuristic"
+num_inference_steps: 40
+guidance_scale: 4.0
+seed: 42

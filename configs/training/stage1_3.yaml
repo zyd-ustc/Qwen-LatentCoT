@@ -1,0 +1,15 @@
+stage: stage1-3
+model_path: /path/to/stage1_2
+data_path:
+  - /path/to/train.jsonl
+output_dir: ./checkpoints/stage1_3
+teacher_latent_dir: ./artifacts/teacher_latents
+batch_size: 1
+grad_accum_steps: 16
+epochs: 3
+learning_rate: 1e-5
+alignment_layer: all_layers
+alignment_weight: 1.0
+latent_size: 8
+mask_question_image: true
+observation_tokens_cannot_see_question_image: true
