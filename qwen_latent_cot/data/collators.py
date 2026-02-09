@@ -27,6 +27,9 @@ from qwen_latent_cot.utils import (
 class CollatorConfig:
     latent_size: int = 8
     image_resize: str = "global"
+    qwen_image_edit_root: str | None = None
+    stage1_1_vae_roundtrip: bool = False
+    stage1_23_noise_vision: bool = False
     not_use_4d: bool = False
     not_mask_image: bool = False
     mask_latent: bool = False
@@ -51,19 +54,94 @@ class StageCollator:
         self.processor = processor
         self.token_ids = token_ids
         self.cfg = cfg
+        self._vae = None
+        self._vae_device = None
+        self._vae_dtype = None
 
         self.answer_start_tensor = torch.tensor(token_ids.answer_start_pattern, dtype=torch.long)
         self.latent_start_tensor = torch.tensor(token_ids.latent_start, dtype=torch.long)
         self.latent_end_tensor = torch.tensor(token_ids.latent_end, dtype=torch.long)
         self.latent_pad_tensor = torch.tensor(token_ids.latent_pad, dtype=torch.long)
-        self.obs_start_tensor = torch.tensor(token_ids.observation_start, dtype=torch.long)
-        self.obs_end_tensor = torch.tensor(token_ids.observation_end, dtype=torch.long)
+        # 单 token 需转为 1D，否则 find_subsequence 中 pattern.size(0) 会报错
+        self.obs_start_tensor = torch.tensor([token_ids.observation_start], dtype=torch.long)
+        self.obs_end_tensor = torch.tensor([token_ids.observation_end], dtype=torch.long)
         self.end_pad_tensor = torch.tensor(token_ids.end_of_text, dtype=torch.long)
         self.img_start_tensor = torch.tensor(token_ids.vision_start, dtype=torch.long)
         self.img_end_tensor = torch.tensor(token_ids.vision_end, dtype=torch.long)
         self.img_pad_tensor = torch.tensor(token_ids.image_pad, dtype=torch.long)
 
         self.special_mask_ids = self.token_ids.to_mask_dict()
+
+        if self.cfg.stage1_1_vae_roundtrip:
+            if not self.cfg.qwen_image_edit_root:
+                raise ValueError("stage1_1_vae_roundtrip requires qwen_image_edit_root")
+            self._init_qwen_image_edit_vae(self.cfg.qwen_image_edit_root)
+
+    def _init_qwen_image_edit_vae(self, model_path: str) -> None:
+        import torch
+
+        try:
+            from diffusers import AutoencoderKLQwenImage  # type: ignore
+        except ImportError as exc:
+            raise ImportError(
+                "diffusers is required for Qwen-Image-Edit VAE. "
+                "Install the latest version: pip install git+https://github.com/huggingface/diffusers"
+            ) from exc
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        dtype = torch.float16 if device == "cuda" else torch.float32
+        vae = AutoencoderKLQwenImage.from_pretrained(
+            model_path,
+            subfolder="vae",
+            torch_dtype=dtype,
+        )
+        vae.to(device)
+        vae.eval()
+
+        self._vae = vae
+        self._vae_device = device
+        self._vae_dtype = dtype
+
+    def _vae_roundtrip_images(self, images: list[Any]) -> list[Any]:
+        if self._vae is None:
+            return images
+
+        import numpy as np
+        import torch
+        from PIL import Image
+
+        out: list[Any] = []
+        scale = float(getattr(self._vae.config, "scaling_factor", 1.0))
+
+        for image in images:
+            if not isinstance(image, Image.Image):
+                out.append(image)
+                continue
+            arr = np.array(image.convert("RGB"), dtype=np.float32) / 255.0
+            # VAE 需要 5D: (B, C, num_frame, H, W)，单图即 num_frame=1
+            tensor = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0).unsqueeze(2)
+            tensor = tensor.to(device=self._vae_device, dtype=self._vae_dtype)
+            tensor = tensor * 2.0 - 1.0
+
+            with torch.no_grad():
+                latents = self._vae.encode(tensor).latent_dist.sample()
+                latents = latents * scale
+                recon = self._vae.decode(latents / scale).sample
+
+            recon = (recon / 2.0 + 0.5).clamp(0, 1)
+            recon = recon[0].squeeze(1).permute(1, 2, 0).detach().cpu().numpy()
+            recon = (recon * 255.0).round().astype("uint8")
+            out.append(Image.fromarray(recon))
+
+        return out
+
+    def _apply_noise_to_pixel_values(self, batch: dict) -> None:
+        if not self.cfg.stage1_23_noise_vision:
+            return
+        pixel_values = batch.get("pixel_values", None)
+        if pixel_values is None:
+            return
+        batch["pixel_values"] = torch.randn_like(pixel_values)
 
     def _process_vision_info(self, examples: list[list[dict]]) -> tuple[list[Any], None]:
         images = []
@@ -101,6 +179,8 @@ class StageCollator:
         image_inputs, _ = self._process_vision_info(data_examples)
         if self.cfg.image_resize == "global":
             image_inputs, _ = resize_by_token_budget(image_inputs)
+        if self.cfg.stage1_1_vae_roundtrip:
+            image_inputs = self._vae_roundtrip_images(image_inputs)
 
         teacher_batch = self.processor(text=texts, images=image_inputs, return_tensors="pt", padding=True)
 
@@ -143,6 +223,7 @@ class StageCollator:
 
         batch = self.processor(text=texts, images=image_inputs, return_tensors="pt", padding=True)
         batch["metadata"] = metadata
+        self._apply_noise_to_pixel_values(batch)
 
         if not self.cfg.not_use_4d:
             attn_mask_4d, _ = build_4d_attn(
@@ -214,6 +295,8 @@ class StageCollator:
             return_tensors="pt",
             padding=True,
         )
+        if self.cfg.stage1_23_noise_vision and "pixel_values" in student_batch:
+            student_batch["pixel_values"] = torch.randn_like(student_batch["pixel_values"])
 
         batch["student_input_ids"] = student_batch["input_ids"]
         batch["student_attention_mask"] = student_batch["attention_mask"]

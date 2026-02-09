@@ -106,6 +106,9 @@ def run_training(cfg: TrainConfig) -> None:
             sft_stage2_per_img_tokens=cfg.sft_stage2_per_img_tokens,
             sft_stage3_img_tokens=cfg.sft_stage3_img_tokens,
             sft_stage2_align_poss=cfg.sft_stage2_align_poss,
+            qwen_image_edit_root=cfg.model_path,
+            stage1_1_vae_roundtrip=(cfg.stage == "stage1-1"),
+            stage1_23_noise_vision=(cfg.stage in {"stage1-2", "stage1-3"}),
         ),
     )
 

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 MODEL_PATH=${MODEL_PATH:-"/path/to/stage1_2"}
-DATA_PATH=${DATA_PATH:-"/path/to/train.jsonl"}
+DATA_PATH=${DATA_PATH:-"./data"}
 OUT_DIR=${OUT_DIR:-"./artifacts/teacher_latents"}
 
 python -m qwen_latent_cot.cli precompute-latent \

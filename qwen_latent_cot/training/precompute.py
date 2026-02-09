@@ -48,7 +48,12 @@ class PrecomputeConfig:
     log_file: str | None = None
 
 
-def _create_model_and_collator(cfg: PrecomputeConfig):
+def _create_model_and_collator(
+    cfg: PrecomputeConfig,
+    *,
+    stage1_1_vae_roundtrip: bool = False,
+    stage1_23_noise_vision: bool = False,
+):
     processor, base_model = load_qwen2_5_vl(cfg.model_path, dtype=cfg.dtype)
     add_latent_special_tokens(processor)
     try:
@@ -77,6 +82,9 @@ def _create_model_and_collator(cfg: PrecomputeConfig):
             latent_can_see_all_previous=cfg.latent_can_see_all_previous,
             mask_question_image=cfg.mask_question_image,
             sft_stage2_align_poss=cfg.sft_stage2_align_poss,
+            qwen_image_edit_root=cfg.model_path,
+            stage1_1_vae_roundtrip=stage1_1_vae_roundtrip,
+            stage1_23_noise_vision=stage1_23_noise_vision,
         ),
     )
     return processor, model, collator, token_ids
@@ -135,7 +143,10 @@ def run_precompute_teacher_latents(cfg: PrecomputeConfig) -> None:
         seed=cfg.seed,
     )
 
-    processor, model, collator, _ = _create_model_and_collator(cfg)
+    processor, model, collator, _ = _create_model_and_collator(
+        cfg,
+        stage1_23_noise_vision=True,
+    )
 
     dataloader = DataLoader(
         dataset,
@@ -197,7 +208,10 @@ def run_precompute_teacher_reps(cfg: PrecomputeConfig) -> None:
         seed=cfg.seed,
     )
 
-    processor, model, collator, token_ids = _create_model_and_collator(cfg)
+    processor, model, collator, token_ids = _create_model_and_collator(
+        cfg,
+        stage1_1_vae_roundtrip=True,
+    )
 
     dataloader = DataLoader(
         dataset,

@@ -37,12 +37,13 @@ def preprocess_sample(
 
         for j, item in enumerate(content):
             if item.get("type") == "image":
-                img_path = item.get("image")
-                if not img_path:
+                img_value = item.get("image")
+                if img_value is None:
                     return None
-                if dataset_root and not os.path.isabs(img_path):
-                    img_path = os.path.join(dataset_root, img_path)
-                item["image"] = img_path
+                if isinstance(img_value, (str, Path)):
+                    if dataset_root and not os.path.isabs(str(img_value)):
+                        img_value = os.path.join(dataset_root, str(img_value))
+                item["image"] = img_value
 
                 if role == "assistant":
                     n_img += 1
@@ -56,12 +57,11 @@ def preprocess_sample(
                 text = item.get("text", "")
                 n_img_pad += text.count("<abs_vis_token></abs_vis_token>")
 
+                if "<observation>" in text:
+                    seen_observation = True
                 if "<observation>" in text and not seen_assistant_img:
                     text = text.replace("<observation>", "").replace("</observation>", "")
                     item["text"] = text
-
-                if "<observation>" in text:
-                    seen_observation = True
 
         data[i]["content"] = content
 

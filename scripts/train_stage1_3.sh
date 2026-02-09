@@ -2,7 +2,7 @@
 set -euo pipefail
 
 MODEL_PATH=${MODEL_PATH:-"/path/to/stage1_2"}
-DATA_PATH=${DATA_PATH:-"/path/to/train.jsonl"}
+DATA_PATH=${DATA_PATH:-"./data"}
 TEACHER_LATENTS=${TEACHER_LATENTS:-"./artifacts/teacher_latents"}
 OUT_DIR=${OUT_DIR:-"./checkpoints/stage1_3"}
 

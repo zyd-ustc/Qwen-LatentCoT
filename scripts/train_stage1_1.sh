@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODEL_PATH=${MODEL_PATH:-"/path/to/qwen2.5-vl-7b"}
-DATA_PATH=${DATA_PATH:-"/path/to/train.jsonl"}
+MODEL_PATH=${MODEL_PATH:-"qwen_latent_cot/models/Qwen-Image-Edit"}
+DATA_PATH=${DATA_PATH:-"./data"}
 OUT_DIR=${OUT_DIR:-"./checkpoints/stage1_1"}
 
 python -m qwen_latent_cot.cli train \

@@ -6,6 +6,7 @@ import argparse
 import os
 
 import torch
+from PIL import Image
 
 from qwen_latent_cot.inference import ReflectionRegenerationPipeline
 from qwen_latent_cot.models.qwen_image_backend import (
@@ -102,6 +103,16 @@ def _add_infer_parser(subparsers) -> None:
     p.add_argument("--openai-base-url", type=str, default=None)
     p.add_argument("--openai-api-key", type=str, default=None)
     p.add_argument("--openai-model", type=str, default="qwen-image")
+    p.add_argument(
+        "--init-image",
+        type=str,
+        default=None,
+        help="Init image for the first turn. Use a file path or 'zeros'.",
+    )
+
+    p.add_argument("--aspect-ratio", type=str, default="1:1",
+                   choices=["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"],
+                   help="Output image aspect ratio (only used with --backend local)")
 
     p.add_argument("--reflector", type=str, default="heuristic", choices=["heuristic", "qwen_vl"])
     p.add_argument("--reflector-model", type=str, default=None)
@@ -113,7 +124,10 @@ def _build_image_backend(args):
     if args.backend == "local":
         if not args.qwen_image_model:
             raise ValueError("--qwen-image-model is required for --backend local")
-        return LocalQwenImageBackend(model_path=args.qwen_image_model)
+        return LocalQwenImageBackend(
+            model_path=args.qwen_image_model,
+            aspect_ratio=getattr(args, "aspect_ratio", "1:1"),
+        )
     if args.backend == "openai_compat":
         base_url = args.openai_base_url or os.environ.get("OPENAI_BASE_URL")
         api_key = args.openai_api_key or os.environ.get("OPENAI_API_KEY")
@@ -149,12 +163,21 @@ def main() -> None:
         image_backend = _build_image_backend(args)
         reflector = _build_reflector(args)
         pipeline = ReflectionRegenerationPipeline(image_backend=image_backend, reflector=reflector)
+        init_image = None
+        if args.init_image:
+            if args.init_image == "zeros":
+                width = int(getattr(image_backend, "width", 1024))
+                height = int(getattr(image_backend, "height", 1024))
+                init_image = Image.new("RGB", (width, height), (0, 0, 0))
+            else:
+                init_image = Image.open(args.init_image).convert("RGB")
         result = pipeline.run_and_save(
             prompt=args.prompt,
             output_dir=args.output_dir,
             num_inference_steps=args.num_inference_steps,
             guidance_scale=args.guidance_scale,
             seed=args.seed,
+            init_image=init_image,
         )
         logger.info("Saved draft image: %s", result["draft"])
         logger.info("Saved refined image: %s", result["refined"])

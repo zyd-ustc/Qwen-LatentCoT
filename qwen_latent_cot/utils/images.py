@@ -2,14 +2,27 @@
 
 from __future__ import annotations
 
+from io import BytesIO
 from pathlib import Path
 from typing import Iterable
 
 from PIL import Image, ImageDraw
 
 
-def load_image(path: str | Path) -> Image.Image:
-    img = Image.open(path)
+def load_image(path: str | Path | bytes | dict | Image.Image) -> Image.Image:
+    if isinstance(path, Image.Image):
+        img = path
+    elif isinstance(path, (bytes, bytearray)):
+        img = Image.open(BytesIO(path))
+    elif isinstance(path, dict):
+        # 仅支持通过 bytes 直接读图，不解析 path 键
+        raw = path.get("bytes")
+        if raw is not None:
+            img = Image.open(BytesIO(raw))
+        else:
+            raise ValueError("Image dict must contain 'bytes'.")
+    else:
+        img = Image.open(path)
     if img.mode != "RGB":
         img = img.convert("RGB")
     return img

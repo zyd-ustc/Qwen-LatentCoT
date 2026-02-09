@@ -39,10 +39,11 @@ class ReflectionRegenerationPipeline:
         num_inference_steps: int = 50,
         guidance_scale: float = 4.0,
         seed: int | None = None,
+        init_image: Image.Image | None = None,
     ) -> PipelineResult:
         draft = self.image_backend.generate(
             prompt=prompt,
-            image=None,
+            image=init_image,
             num_inference_steps=num_inference_steps,
             guidance_scale=guidance_scale,
             seed=seed,
@@ -74,6 +75,7 @@ class ReflectionRegenerationPipeline:
         num_inference_steps: int = 50,
         guidance_scale: float = 4.0,
         seed: int | None = None,
+        init_image: Image.Image | None = None,
     ) -> dict:
         out_dir = Path(output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -83,6 +85,7 @@ class ReflectionRegenerationPipeline:
             num_inference_steps=num_inference_steps,
             guidance_scale=guidance_scale,
             seed=seed,
+            init_image=init_image,
         )
 
         draft_path = out_dir / "draft.png"

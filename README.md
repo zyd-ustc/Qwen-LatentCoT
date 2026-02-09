@@ -43,10 +43,40 @@ python -m qwen_latent_cot.cli infer \
 - `refined.png`
 - `result.json`（包含 reflection 与 refine_prompt）
 
-### 2) 真实推理（有权重时）
+### 2) 使用本地权重推理
 
-- Qwen-image：`--backend local --qwen-image-model <path>`（依赖本地 `qwen_image` runtime）
-- 反思器：`--reflector qwen_vl --reflector-model <qwen2.5vl_path>`
+将 Qwen-Image 模型权重放在 `qwen_latent_cot/models/Qwen-Image/` 下（或任意路径），然后：
+
+```bash
+python -m qwen_latent_cot.cli infer \
+  --prompt "A red car parked on a beach at sunset" \
+  --output-dir ./outputs/demo_local \
+  --backend local \
+  --qwen-image-model qwen_latent_cot/models/Qwen-Image \
+  --reflector heuristic \
+  --num-inference-steps 50 \
+  --guidance-scale 4.0 \
+  --aspect-ratio 1:1
+```
+
+也可以用快捷脚本（默认读取 `qwen_latent_cot/models/Qwen-Image`）：
+
+```bash
+BACKEND=local QWEN_IMAGE_MODEL=qwen_latent_cot/models/Qwen-Image \
+  bash scripts/infer_two_turn.sh "A red car parked on a beach at sunset"
+
+如果你已经把权重放到默认目录，可以省略 `QWEN_IMAGE_MODEL`：
+
+```bash
+BACKEND=local bash scripts/infer_two_turn.sh "A red car parked on a beach at sunset"
+```
+```
+
+支持的画面比例：`1:1`、`16:9`、`9:16`、`4:3`、`3:4`、`3:2`、`2:3`。
+
+> **依赖提示**：本地推理需安装最新版 diffusers：`pip install git+https://github.com/huggingface/diffusers`
+
+- 反思器：`--reflector qwen_vl --reflector-model <qwen2.5vl_path>`（加载 Qwen2.5-VL 进行反思）
 
 ## 训练 Stage1-1 / 1-2 / 1-3
 

@@ -44,34 +44,68 @@ class MockQwenImageBackend:
 
 
 class LocalQwenImageBackend:
-    """Backend for local Qwen-image runtime.
+    """Backend for local Qwen-image model loaded via diffusers.
 
-    This backend expects an importable local runtime implementation. For example,
-    a custom package exposing `QwenImagePipeline` with `from_pretrained` and
-    `__call__/edit` APIs.
+    Uses ``DiffusionPipeline.from_pretrained`` to load the QwenImagePipeline
+    from a local checkpoint directory (e.g. ``qwen_latent_cot/models/Qwen-Image``).
     """
+
+    # Default resolutions (width, height) keyed by aspect ratio label.
+    ASPECT_RATIOS: dict[str, tuple[int, int]] = {
+        "1:1": (1328, 1328),
+        "16:9": (1664, 928),
+        "9:16": (928, 1664),
+        "4:3": (1472, 1140),
+        "3:4": (1140, 1472),
+        "3:2": (1584, 1056),
+        "2:3": (1056, 1584),
+    }
 
     def __init__(
         self,
         model_path: str,
         trust_remote_code: bool = True,
-        device: str = "cuda",
+        device: str | None = None,
         dtype: str = "bfloat16",
+        aspect_ratio: str = "1:1",
     ) -> None:
+        import torch as _torch
+
         try:
-            from qwen_image import QwenImagePipeline  # type: ignore
+            from diffusers import DiffusionPipeline  # type: ignore
         except ImportError as exc:
             raise ImportError(
-                "Local Qwen-image runtime not found. Install your local `qwen_image` package "
-                "or use `--backend mock`/`--backend openai_compat`."
+                "diffusers is required for the local Qwen-image backend. "
+                "Install the latest version: pip install git+https://github.com/huggingface/diffusers"
             ) from exc
 
-        self.pipe = QwenImagePipeline.from_pretrained(
+        _dtype_map = {
+            "float16": _torch.float16,
+            "fp16": _torch.float16,
+            "bfloat16": _torch.bfloat16,
+            "bf16": _torch.bfloat16,
+            "float32": _torch.float32,
+            "fp32": _torch.float32,
+        }
+        torch_dtype = _dtype_map.get(dtype.lower(), _torch.bfloat16)
+
+        if device is None:
+            device = "cuda" if _torch.cuda.is_available() else "cpu"
+
+        self.device = device
+        self.pipe = DiffusionPipeline.from_pretrained(
             model_path,
+            torch_dtype=torch_dtype,
             trust_remote_code=trust_remote_code,
-            device=device,
-            dtype=dtype,
         )
+        self.pipe = self.pipe.to(device)
+
+        if aspect_ratio not in self.ASPECT_RATIOS:
+            raise ValueError(
+                f"Unsupported aspect_ratio '{aspect_ratio}'. "
+                f"Choose from {list(self.ASPECT_RATIOS.keys())}"
+            )
+        self.width, self.height = self.ASPECT_RATIOS[aspect_ratio]
 
     def generate(
         self,
@@ -81,25 +115,39 @@ class LocalQwenImageBackend:
         guidance_scale: float = 4.0,
         seed: int | None = None,
     ) -> Image.Image:
-        if image is None:
-            out = self.pipe(
-                prompt=prompt,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-                seed=seed,
-            )
-        else:
-            if not hasattr(self.pipe, "edit"):
-                raise RuntimeError("Current local Qwen-image backend does not support image editing")
-            out = self.pipe.edit(
-                prompt=prompt,
-                image=image,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-                seed=seed,
-            )
+        import torch as _torch
 
-        if hasattr(out, "images"):
+        # Build reproducible generator if seed is given.
+        generator = None
+        if seed is not None:
+            generator = _torch.Generator(device=self.device).manual_seed(seed)
+
+        kwargs: dict = dict(
+            prompt=prompt,
+            negative_prompt=" ",
+            num_inference_steps=num_inference_steps,
+            true_cfg_scale=guidance_scale,
+            generator=generator,
+        )
+
+        if image is None:
+            kwargs["width"] = self.width
+            kwargs["height"] = self.height
+        else:
+            kwargs["image"] = image
+
+        try:
+            out = self.pipe(**kwargs)
+        except TypeError as exc:
+            if image is not None and "image" in kwargs and "image" in str(exc):
+                kwargs.pop("image", None)
+                kwargs["width"] = self.width
+                kwargs["height"] = self.height
+                out = self.pipe(**kwargs)
+            else:
+                raise
+
+        if hasattr(out, "images") and out.images:
             return out.images[0]
         if isinstance(out, Image.Image):
             return out
