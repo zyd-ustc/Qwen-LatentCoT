@@ -30,6 +30,12 @@ def _base_training_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--data-path", type=str, nargs="+", required=True)
     parser.add_argument("--output-dir", type=str, required=True)
     parser.add_argument("--dataset-root", type=str, default="")
+    parser.add_argument(
+        "--qwen-image-edit-root",
+        type=str,
+        default="",
+        help="Optional Qwen-Image-Edit root path (used for VAE roundtrip in stage1-1 teacher-rep precompute).",
+    )
     parser.add_argument("--allow-no-observation", action="store_true")
     parser.add_argument("--shuffle-train", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
@@ -60,6 +66,12 @@ def _add_train_parser(subparsers) -> None:
     _base_training_parser(p)
 
     p.add_argument("--stage", type=str, required=True, choices=["stage1-1", "stage1-2", "stage1-3"])
+    p.add_argument(
+        "--deepspeed",
+        type=str,
+        default="",
+        help="Optional DeepSpeed config JSON path (e.g. configs/deepspeed/zero2_bf16.json) to reduce VRAM usage.",
+    )
     p.add_argument("--epochs", type=int, default=1)
     p.add_argument("--grad-accum-steps", type=int, default=1)
     p.add_argument("--learning-rate", type=float, default=1e-5)
@@ -88,6 +100,12 @@ def _add_precompute_parsers(subparsers) -> None:
     rep = subparsers.add_parser("precompute-rep", help="Precompute teacher hidden states")
     _base_training_parser(rep)
     rep.add_argument("--output-hidden-states", action="store_true")
+    rep.add_argument(
+        "--save-every",
+        type=int,
+        default=2000,
+        help="Save checkpoint every N samples for resumability (default: 2000)",
+    )
 
 
 def _add_infer_parser(subparsers) -> None:
@@ -192,6 +210,8 @@ def main() -> None:
             data_paths=args.data_path,
             output_dir=args.output_dir,
             dataset_root=args.dataset_root,
+            qwen_image_edit_root=args.qwen_image_edit_root,
+            deepspeed=args.deepspeed,
             allow_no_observation=args.allow_no_observation,
             shuffle_train=args.shuffle_train,
             seed=args.seed,
@@ -236,6 +256,7 @@ def main() -> None:
             data_paths=args.data_path,
             output_dir=args.output_dir,
             dataset_root=args.dataset_root,
+            qwen_image_edit_root=args.qwen_image_edit_root,
             allow_no_observation=args.allow_no_observation,
             shuffle_train=args.shuffle_train,
             seed=args.seed,
@@ -254,6 +275,7 @@ def main() -> None:
             output_hidden_states=args.output_hidden_states,
             output_latent_embeds=getattr(args, "output_latent_embeds", False),
             log_file=args.log_file,
+            save_every=getattr(args, "save_every", 2000),
         )
 
         if args.command == "precompute-latent":

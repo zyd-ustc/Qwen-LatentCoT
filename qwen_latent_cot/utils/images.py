@@ -40,18 +40,21 @@ def resize_by_token_budget(
     per_img_max_pixels: int = 1280 * 28 * 28,
     divisor: int = 28,
 ) -> tuple[list[Image.Image], list[tuple[int, int]] | None]:
-    total = sum(img.width * img.height for img in images)
-    if total <= global_max_pixels:
-        return images, None
-
     import math
 
-    ratio = math.sqrt(global_max_pixels / total)
+    if not images:
+        return images, None
+
+    total = sum(img.width * img.height for img in images)
+    ratio = math.sqrt(global_max_pixels / total) if total > global_max_pixels else 1.0
+
     processed: list[Image.Image] = []
     new_sizes: list[tuple[int, int]] = []
+    changed = False
 
     for img in images:
-        w, h = int(img.width * ratio), int(img.height * ratio)
+        w = int(img.width * ratio)
+        h = int(img.height * ratio)
         w = max(divisor, (w // divisor) * divisor)
         h = max(divisor, (h // divisor) * divisor)
 
@@ -60,9 +63,16 @@ def resize_by_token_budget(
             w = max(divisor, (int(w * r) // divisor) * divisor)
             h = max(divisor, (int(h * r) // divisor) * divisor)
 
-        processed.append(img.resize((w, h), Image.BICUBIC))
-        new_sizes.append((w, h))
+        if w != img.width or h != img.height:
+            changed = True
+            processed.append(img.resize((w, h), Image.BICUBIC))
+            new_sizes.append((w, h))
+        else:
+            processed.append(img)
+            new_sizes.append((img.width, img.height))
 
+    if not changed:
+        return images, None
     return processed, new_sizes
 
 

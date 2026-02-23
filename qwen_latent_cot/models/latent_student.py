@@ -333,6 +333,9 @@ class LatentQwenVLWrapper(nn.Module):
 
 def freeze_visual_encoder(model: nn.Module) -> None:
     visual = getattr(model, "visual", None)
+    # Qwen2.5-VL keeps vision encoder under `model.visual`.
+    if visual is None and hasattr(model, "model"):
+        visual = getattr(getattr(model, "model", None), "visual", None)
     if visual is None:
         return
     for p in visual.parameters():

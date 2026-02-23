@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +29,7 @@ class PrecomputeConfig:
     data_paths: list[str]
     output_dir: str
     dataset_root: str = ""
+    qwen_image_edit_root: str = ""
     allow_no_observation: bool = False
     shuffle_train: bool = False
     seed: int = 42
@@ -46,6 +48,7 @@ class PrecomputeConfig:
     output_hidden_states: bool = True
     output_latent_embeds: bool = False
     log_file: str | None = None
+    save_every: int = 2000
 
 
 def _create_model_and_collator(
@@ -54,7 +57,11 @@ def _create_model_and_collator(
     stage1_1_vae_roundtrip: bool = False,
     stage1_23_noise_vision: bool = False,
 ):
-    processor, base_model = load_qwen2_5_vl(cfg.model_path, dtype=cfg.dtype)
+    processor, base_model = load_qwen2_5_vl(
+        cfg.model_path,
+        dtype=cfg.dtype,
+        base_model_path=(cfg.qwen_image_edit_root or None),
+    )
     add_latent_special_tokens(processor)
     try:
         base_model.resize_token_embeddings(len(processor.tokenizer))
@@ -82,8 +89,17 @@ def _create_model_and_collator(
             latent_can_see_all_previous=cfg.latent_can_see_all_previous,
             mask_question_image=cfg.mask_question_image,
             sft_stage2_align_poss=cfg.sft_stage2_align_poss,
-            qwen_image_edit_root=cfg.model_path,
-            stage1_1_vae_roundtrip=stage1_1_vae_roundtrip,
+            qwen_image_edit_root=(
+                cfg.qwen_image_edit_root
+                or (cfg.model_path if os.path.isdir(os.path.join(cfg.model_path, "vae")) else None)
+            ),
+            stage1_1_vae_roundtrip=(
+                stage1_1_vae_roundtrip
+                and bool(
+                    cfg.qwen_image_edit_root
+                    or os.path.isdir(os.path.join(cfg.model_path, "vae"))
+                )
+            ),
             stage1_23_noise_vision=stage1_23_noise_vision,
         ),
     )
@@ -226,11 +242,30 @@ def run_precompute_teacher_reps(cfg: PrecomputeConfig) -> None:
     out_dir = Path(cfg.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    checkpoint_path = out_dir / ".precompute_rep_checkpoint.json"
+    completed: set[str] = set()
+    if checkpoint_path.exists():
+        with open(checkpoint_path) as f:
+            completed = set(json.load(f))
+        logger.info("Resuming: %d samples already completed", len(completed))
+
     answer_start = torch.tensor(token_ids.answer_start_pattern, dtype=torch.long)
     latent_end = torch.tensor(token_ids.latent_end, dtype=torch.long)
+    total_saved = 0
+
+    def _save_checkpoint() -> None:
+        with open(checkpoint_path, "w") as f:
+            json.dump(sorted(completed), f, indent=0)
+        logger.info("Checkpoint saved: %d samples completed", len(completed))
 
     with torch.inference_mode():
         for batch in tqdm(dataloader, desc="Precompute teacher reps"):
+            batch_metadata_infos = [
+                f"{_prefix(cfg)}_{md['dataset_name']}_{md['sample_id']}"
+                for md in batch["metadata"]
+            ]
+            if all(mi in completed for mi in batch_metadata_infos):
+                continue
             pixel_values = batch.get("teacher_pixel_values", None)
             image_grid_thw = batch.get("teacher_image_grid_thw", None)
             if pixel_values is not None:
@@ -266,6 +301,8 @@ def run_precompute_teacher_reps(cfg: PrecomputeConfig) -> None:
             for i, rep in enumerate(reps):
                 md = batch["metadata"][i]
                 metadata_info = f"{_prefix(cfg)}_{md['dataset_name']}_{md['sample_id']}"
+                if metadata_info in completed:
+                    continue
                 if cfg.sft_stage2_align_poss == "obs":
                     fname = f"rep_{metadata_info}.pt"
                 else:
@@ -274,5 +311,11 @@ def run_precompute_teacher_reps(cfg: PrecomputeConfig) -> None:
                     {"metadata_info": metadata_info, "latent": rep.detach().cpu()},
                     out_dir / fname,
                 )
+                completed.add(metadata_info)
+                total_saved += 1
+                if total_saved > 0 and total_saved % cfg.save_every == 0:
+                    _save_checkpoint()
 
+    if total_saved > 0 and total_saved % cfg.save_every != 0:
+        _save_checkpoint()
     logger.info("Saved teacher reps to %s", out_dir)

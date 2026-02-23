@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
+import torch
 from transformers import TrainingArguments
 
 from qwen_latent_cot.data import LatentCoTDataset
@@ -19,6 +21,53 @@ from qwen_latent_cot.training.trainers import Stage11Trainer, Stage12Trainer, St
 from qwen_latent_cot.utils import build_logger, seed_everything
 
 
+def _maybe_patch_transformers_dtype_for_dataparallel(logger) -> None:
+    """Patch transformers' `.dtype` property to be DataParallel-safe.
+
+    PyTorch DataParallel replicas store parameters as plain tensors (not `nn.Parameter`),
+    so `PreTrainedModel.dtype` (which iterates `self.parameters()`) can raise StopIteration.
+    Qwen2.5-VL calls `self.visual.dtype` inside forward, so we patch to also scan `_parameters`.
+    """
+    # Only relevant when Trainer falls back to DataParallel (single process, multi-GPU).
+    if not torch.cuda.is_available() or torch.cuda.device_count() <= 1:
+        return
+    if os.environ.get("LOCAL_RANK") is not None or os.environ.get("RANK") is not None:
+        return
+    if os.environ.get("WORLD_SIZE") not in (None, "", "1"):
+        return
+
+    try:
+        from transformers.modeling_utils import ModuleUtilsMixin  # type: ignore
+    except Exception:
+        return
+
+    if getattr(ModuleUtilsMixin, "_qwen_latent_cot_safe_dtype_patched", False):
+        return
+
+    orig_prop = getattr(ModuleUtilsMixin, "dtype", None)
+    orig_fget = orig_prop.fget if isinstance(orig_prop, property) else None
+
+    def _safe_dtype(self) -> torch.dtype:  # type: ignore[no-redef]
+        if orig_fget is not None:
+            try:
+                return orig_fget(self)
+            except StopIteration:
+                pass
+        # DataParallel replicas keep tensors in `_parameters`/`_buffers`.
+        for coll_name in ("_parameters", "_buffers"):
+            coll = getattr(self, coll_name, None) or {}
+            for t in coll.values():
+                if t is None:
+                    continue
+                if hasattr(t, "is_floating_point") and t.is_floating_point():
+                    return t.dtype
+        return torch.get_default_dtype()
+
+    ModuleUtilsMixin.dtype = property(_safe_dtype)  # type: ignore[assignment]
+    setattr(ModuleUtilsMixin, "_qwen_latent_cot_safe_dtype_patched", True)
+    logger.warning("Patched transformers ModuleUtilsMixin.dtype for DataParallel replicas.")
+
+
 @dataclass
 class TrainConfig:
     stage: str
@@ -26,6 +75,8 @@ class TrainConfig:
     data_paths: list[str]
     output_dir: str
     dataset_root: str = ""
+    qwen_image_edit_root: str = ""
+    deepspeed: str = ""
     allow_no_observation: bool = False
     shuffle_train: bool = False
     seed: int = 42
@@ -65,8 +116,27 @@ class TrainConfig:
 def run_training(cfg: TrainConfig) -> None:
     logger = build_logger("qwen_latent_cot.train", cfg.log_file)
     seed_everything(cfg.seed)
+    _maybe_patch_transformers_dtype_for_dataparallel(logger)
+    if (
+        torch.cuda.is_available()
+        and torch.cuda.device_count() > 1
+        and not cfg.deepspeed
+        and os.environ.get("LOCAL_RANK") is None
+        and os.environ.get("RANK") is None
+        and os.environ.get("WORLD_SIZE") in (None, "", "1")
+    ):
+        raise RuntimeError(
+            "Detected multi-GPU non-distributed run. "
+            "This falls back to torch DataParallel, which is incompatible with Qwen2.5-VL "
+            "vision inputs in this project. "
+            "Use a single visible GPU (e.g. CUDA_VISIBLE_DEVICES=0) or launch with DeepSpeed."
+        )
 
-    processor, base_model = load_qwen2_5_vl(cfg.model_path, dtype=cfg.dtype)
+    processor, base_model = load_qwen2_5_vl(
+        cfg.model_path,
+        dtype=cfg.dtype,
+        base_model_path=(cfg.qwen_image_edit_root or None),
+    )
     add_latent_special_tokens(processor)
     try:
         base_model.resize_token_embeddings(len(processor.tokenizer))
@@ -106,8 +176,17 @@ def run_training(cfg: TrainConfig) -> None:
             sft_stage2_per_img_tokens=cfg.sft_stage2_per_img_tokens,
             sft_stage3_img_tokens=cfg.sft_stage3_img_tokens,
             sft_stage2_align_poss=cfg.sft_stage2_align_poss,
-            qwen_image_edit_root=cfg.model_path,
-            stage1_1_vae_roundtrip=(cfg.stage == "stage1-1"),
+            qwen_image_edit_root=(
+                cfg.qwen_image_edit_root
+                or (cfg.model_path if os.path.isdir(os.path.join(cfg.model_path, "vae")) else None)
+            ),
+            stage1_1_vae_roundtrip=(
+                cfg.stage == "stage1-1"
+                and bool(
+                    cfg.qwen_image_edit_root
+                    or os.path.isdir(os.path.join(cfg.model_path, "vae"))
+                )
+            ),
             stage1_23_noise_vision=(cfg.stage in {"stage1-2", "stage1-3"}),
         ),
     )
@@ -142,6 +221,7 @@ def run_training(cfg: TrainConfig) -> None:
         logging_strategy="steps",
         bf16=(cfg.dtype.lower() in {"bf16", "bfloat16"}),
         fp16=(cfg.dtype.lower() in {"fp16", "float16"}),
+        deepspeed=(cfg.deepspeed or None),
         remove_unused_columns=False,
         report_to=[],
         dataloader_num_workers=0,

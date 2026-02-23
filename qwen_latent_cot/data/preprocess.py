@@ -59,9 +59,6 @@ def preprocess_sample(
 
                 if "<observation>" in text:
                     seen_observation = True
-                if "<observation>" in text and not seen_assistant_img:
-                    text = text.replace("<observation>", "").replace("</observation>", "")
-                    item["text"] = text
 
         data[i]["content"] = content
 

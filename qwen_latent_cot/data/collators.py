@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -88,8 +89,20 @@ class StageCollator:
                 "Install the latest version: pip install git+https://github.com/huggingface/diffusers"
             ) from exc
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        dtype = torch.float16 if device == "cuda" else torch.float32
+        # IMPORTANT (DDP): initialize VAE on *this rank's* GPU explicitly.
+        # Collator is constructed before Trainer/Accelerate sets the current CUDA device,
+        # so using plain "cuda" may incorrectly place weights on cuda:0 for all ranks.
+        if torch.cuda.is_available():
+            local_rank = os.environ.get("LOCAL_RANK")
+            try:
+                idx = int(local_rank) if local_rank is not None else torch.cuda.current_device()
+            except Exception:
+                idx = torch.cuda.current_device()
+            device = torch.device(f"cuda:{idx}")
+            dtype = torch.float16
+        else:
+            device = torch.device("cpu")
+            dtype = torch.float32
         vae = AutoencoderKLQwenImage.from_pretrained(
             model_path,
             subfolder="vae",
@@ -183,6 +196,21 @@ class StageCollator:
             image_inputs = self._vae_roundtrip_images(image_inputs)
 
         teacher_batch = self.processor(text=texts, images=image_inputs, return_tensors="pt", padding=True)
+        image_grid_thw = teacher_batch.get("image_grid_thw")
+        if image_grid_thw is not None:
+            # Qwen2.5-VL visual encoder merges 2x2 spatial tokens (merge unit = 4).
+            # Catch invalid grids here so we can report sample metadata clearly.
+            for idx, grid in enumerate(image_grid_thw.tolist()):
+                t, h, w = int(grid[0]), int(grid[1]), int(grid[2])
+                if (t * h * w) % 4 != 0:
+                    meta = batch["metadata"][idx] if idx < len(batch["metadata"]) else {}
+                    img_size = (
+                        image_inputs[idx].size if idx < len(image_inputs) and hasattr(image_inputs[idx], "size") else None
+                    )
+                    raise ValueError(
+                        "Invalid image_grid_thw for Qwen2.5-VL: "
+                        f"idx={idx}, grid_thw={(t, h, w)}, image_size={img_size}, metadata={meta}"
+                    )
 
         batch["teacher_input_ids"] = teacher_batch["input_ids"]
         batch["teacher_attention_mask"] = teacher_batch["attention_mask"]
