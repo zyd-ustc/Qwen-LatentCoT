@@ -7,7 +7,7 @@ import io
 import json
 import urllib.request
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, Sequence
 
 from PIL import Image
 
@@ -93,12 +93,17 @@ class LocalQwenImageBackend:
             device = "cuda" if _torch.cuda.is_available() else "cpu"
 
         self.device = device
+        self.model_path = model_path
+        self.torch_dtype = torch_dtype
+        self.trust_remote_code = trust_remote_code
         self.pipe = DiffusionPipeline.from_pretrained(
             model_path,
             torch_dtype=torch_dtype,
             trust_remote_code=trust_remote_code,
         )
         self.pipe = self.pipe.to(device)
+        self.edit_pipe = None
+        self.last_call_debug: dict | None = None
 
         if aspect_ratio not in self.ASPECT_RATIOS:
             raise ValueError(
@@ -106,6 +111,31 @@ class LocalQwenImageBackend:
                 f"Choose from {list(self.ASPECT_RATIOS.keys())}"
             )
         self.width, self.height = self.ASPECT_RATIOS[aspect_ratio]
+
+    def _ensure_edit_pipe(self):
+        # Many Qwen-Image-Edit checkpoints are already loaded as QwenImageEditPlusPipeline
+        # via DiffusionPipeline.from_pretrained(...). Reuse it to avoid double VRAM usage.
+        if self.pipe.__class__.__name__ == "QwenImageEditPlusPipeline":
+            return self.pipe
+
+        if self.edit_pipe is not None:
+            return self.edit_pipe
+
+        try:
+            from diffusers import QwenImageEditPlusPipeline  # type: ignore
+        except ImportError as exc:
+            raise ImportError(
+                "QwenImageEditPlusPipeline is required for edit-plus refinement. "
+                "Install the latest diffusers from source."
+            ) from exc
+
+        self.edit_pipe = QwenImageEditPlusPipeline.from_pretrained(
+            self.model_path,
+            torch_dtype=self.torch_dtype,
+            trust_remote_code=self.trust_remote_code,
+        )
+        self.edit_pipe = self.edit_pipe.to(self.device)
+        return self.edit_pipe
 
     def generate(
         self,
@@ -129,10 +159,25 @@ class LocalQwenImageBackend:
             true_cfg_scale=guidance_scale,
             generator=generator,
         )
+        pipe_name = self.pipe.__class__.__name__
+        self.last_call_debug = {
+            "method": "generate",
+            "pipeline_class": pipe_name,
+            "num_inference_steps": int(num_inference_steps),
+            "true_cfg_scale": float(guidance_scale),
+            "has_image_input": image is not None,
+            "seed": seed,
+        }
 
         if image is None:
-            kwargs["width"] = self.width
-            kwargs["height"] = self.height
+            if pipe_name == "QwenImageEditPlusPipeline":
+                # Edit-plus requires an image input even for draft generation.
+                # Inject a zero image for compatibility when caller passes image=None.
+                kwargs["image"] = Image.new("RGB", (self.width, self.height), (0, 0, 0))
+                self.last_call_debug["auto_injected_zero_image"] = True
+            else:
+                kwargs["width"] = self.width
+                kwargs["height"] = self.height
         else:
             kwargs["image"] = image
 
@@ -152,6 +197,55 @@ class LocalQwenImageBackend:
         if isinstance(out, Image.Image):
             return out
         raise RuntimeError("Unsupported output from local Qwen-image backend")
+
+    def generate_edit(
+        self,
+        prompt: str,
+        images: Sequence[Image.Image],
+        num_inference_steps: int = 50,
+        guidance_scale: float = 4.0,
+        seed: int | None = None,
+    ) -> Image.Image:
+        import torch as _torch
+
+        if not images:
+            raise ValueError("`images` must contain at least one image for edit generation.")
+
+        edit_pipe = self._ensure_edit_pipe()
+
+        generator = None
+        if seed is not None:
+            generator = _torch.Generator(device=self.device).manual_seed(seed)
+
+        kwargs: dict = dict(
+            image=list(images),
+            prompt=prompt,
+            generator=generator,
+            true_cfg_scale=guidance_scale,
+            negative_prompt=" ",
+            num_inference_steps=num_inference_steps,
+            guidance_scale=1.0,
+            num_images_per_prompt=1,
+        )
+        self.last_call_debug = {
+            "method": "generate_edit",
+            "pipeline_class": edit_pipe.__class__.__name__,
+            "num_inference_steps": int(num_inference_steps),
+            "true_cfg_scale": float(guidance_scale),
+            "guidance_scale": 1.0,
+            "num_images_per_prompt": 1,
+            "seed": seed,
+            "input_image_specs": [
+                {"index": i, "mode": img.mode, "size": [int(img.width), int(img.height)]}
+                for i, img in enumerate(images)
+            ],
+        }
+        out = edit_pipe(**kwargs)
+        if hasattr(out, "images") and out.images:
+            return out.images[0]
+        if isinstance(out, Image.Image):
+            return out
+        raise RuntimeError("Unsupported output from local Qwen-image edit backend")
 
 
 class OpenAICompatQwenImageBackend:

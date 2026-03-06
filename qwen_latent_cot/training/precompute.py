@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
 from qwen_latent_cot.data import LatentCoTDataset
@@ -30,6 +30,7 @@ class PrecomputeConfig:
     output_dir: str
     dataset_root: str = ""
     qwen_image_edit_root: str = ""
+    deepspeed: str = ""
     allow_no_observation: bool = False
     shuffle_train: bool = False
     seed: int = 42
@@ -49,6 +50,61 @@ class PrecomputeConfig:
     output_latent_embeds: bool = False
     log_file: str | None = None
     save_every: int = 2000
+
+
+def _resolve_rank_world(cfg: PrecomputeConfig, logger) -> tuple[int, int, int]:
+    rank = int(os.environ.get("RANK", "0"))
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+
+    if cfg.deepspeed and world_size > 1:
+        import deepspeed
+
+        deepspeed.init_distributed()
+        rank = int(os.environ.get("RANK", str(rank)))
+        world_size = int(os.environ.get("WORLD_SIZE", str(world_size)))
+        local_rank = int(os.environ.get("LOCAL_RANK", str(local_rank)))
+        logger.info(
+            "DeepSpeed distributed enabled: rank=%d world_size=%d local_rank=%d",
+            rank,
+            world_size,
+            local_rank,
+        )
+    return rank, world_size, local_rank
+
+
+def _place_and_wrap_model(model, cfg: PrecomputeConfig, local_rank: int):
+    if torch.cuda.is_available():
+        if cfg.deepspeed:
+            torch.cuda.set_device(local_rank)
+            device = torch.device("cuda", local_rank)
+        else:
+            device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
+
+    if cfg.deepspeed:
+        import deepspeed
+
+        model_engine, _, _, _ = deepspeed.initialize(
+            model=model,
+            # Precompute is inference-only; avoid optimizer construction (e.g. CPUAdam JIT build).
+            model_parameters=None,
+            config=cfg.deepspeed,
+        )
+        model_engine.eval()
+        return model_engine, device
+
+    model.to(device)
+    model.eval()
+    return model, device
+
+
+def _shard_dataset_for_rank(dataset: LatentCoTDataset, rank: int, world_size: int):
+    if world_size <= 1:
+        return dataset
+    indices = list(range(rank, len(dataset), world_size))
+    return Subset(dataset, indices)
 
 
 def _create_model_and_collator(
@@ -150,13 +206,21 @@ def _extract_positions_hidden(
 def run_precompute_teacher_latents(cfg: PrecomputeConfig) -> None:
     seed_everything(cfg.seed)
     logger = build_logger("qwen_latent_cot.precompute_latent", cfg.log_file)
+    rank, world_size, local_rank = _resolve_rank_world(cfg, logger)
 
-    dataset = LatentCoTDataset(
+    full_dataset = LatentCoTDataset(
         data_paths=cfg.data_paths,
         dataset_root=cfg.dataset_root,
         allow_no_observation=cfg.allow_no_observation,
         shuffle=cfg.shuffle_train,
         seed=cfg.seed,
+    )
+    dataset = _shard_dataset_for_rank(full_dataset, rank, world_size)
+    logger.info(
+        "Loaded %d samples on rank %d (global total: %d)",
+        len(dataset),
+        rank,
+        len(full_dataset),
     )
 
     processor, model, collator, _ = _create_model_and_collator(
@@ -171,14 +235,13 @@ def run_precompute_teacher_latents(cfg: PrecomputeConfig) -> None:
         collate_fn=collator.collate_stage1_2,
     )
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
+    model, device = _place_and_wrap_model(model, cfg, local_rank)
 
     out_dir = Path(cfg.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     with torch.inference_mode():
-        for batch in tqdm(dataloader, desc="Precompute teacher latents"):
+        for batch in tqdm(dataloader, desc="Precompute teacher latents", disable=(rank != 0)):
             pixel_values = batch.get("pixel_values", None)
             image_grid_thw = batch.get("image_grid_thw", None)
             if pixel_values is not None:
@@ -215,13 +278,21 @@ def run_precompute_teacher_latents(cfg: PrecomputeConfig) -> None:
 def run_precompute_teacher_reps(cfg: PrecomputeConfig) -> None:
     seed_everything(cfg.seed)
     logger = build_logger("qwen_latent_cot.precompute_rep", cfg.log_file)
+    rank, world_size, local_rank = _resolve_rank_world(cfg, logger)
 
-    dataset = LatentCoTDataset(
+    full_dataset = LatentCoTDataset(
         data_paths=cfg.data_paths,
         dataset_root=cfg.dataset_root,
         allow_no_observation=cfg.allow_no_observation,
         shuffle=cfg.shuffle_train,
         seed=cfg.seed,
+    )
+    dataset = _shard_dataset_for_rank(full_dataset, rank, world_size)
+    logger.info(
+        "Loaded %d samples on rank %d (global total: %d)",
+        len(dataset),
+        rank,
+        len(full_dataset),
     )
 
     processor, model, collator, token_ids = _create_model_and_collator(
@@ -236,13 +307,17 @@ def run_precompute_teacher_reps(cfg: PrecomputeConfig) -> None:
         collate_fn=collator.collate_stage1_1,
     )
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
+    model, device = _place_and_wrap_model(model, cfg, local_rank)
 
     out_dir = Path(cfg.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    checkpoint_path = out_dir / ".precompute_rep_checkpoint.json"
+    checkpoint_name = (
+        f".precompute_rep_checkpoint_rank{rank}.json"
+        if world_size > 1
+        else ".precompute_rep_checkpoint.json"
+    )
+    checkpoint_path = out_dir / checkpoint_name
     completed: set[str] = set()
     if checkpoint_path.exists():
         with open(checkpoint_path) as f:
@@ -259,7 +334,7 @@ def run_precompute_teacher_reps(cfg: PrecomputeConfig) -> None:
         logger.info("Checkpoint saved: %d samples completed", len(completed))
 
     with torch.inference_mode():
-        for batch in tqdm(dataloader, desc="Precompute teacher reps"):
+        for batch in tqdm(dataloader, desc="Precompute teacher reps", disable=(rank != 0)):
             batch_metadata_infos = [
                 f"{_prefix(cfg)}_{md['dataset_name']}_{md['sample_id']}"
                 for md in batch["metadata"]

@@ -227,9 +227,29 @@ class LatentQwenVLWrapper(nn.Module):
 
         loss_type = list(loss_type or [])
 
+        # ZeRO-3 offload keeps params on CPU; ensure inputs match embedding device to avoid
+        # "Expected all tensors to be on the same device" in get_input_embeddings()(input_ids).
+        _device = self.model.get_input_embeddings().weight.device
+        if input_ids is not None and input_ids.device != _device:
+            input_ids = input_ids.to(_device)
+        if attention_mask is not None and attention_mask.device != _device:
+            attention_mask = attention_mask.to(_device)
+        if pixel_values is not None and pixel_values.device != _device:
+            pixel_values = pixel_values.to(_device)
+        if image_grid_thw is not None and image_grid_thw.device != _device:
+            image_grid_thw = image_grid_thw.to(_device)
+        if labels is not None and labels.device != _device:
+            labels = labels.to(_device)
         if attention_mask_4d is not None and isinstance(attention_mask_4d, dict):
-            if "full_attention" in attention_mask_4d:
-                attention_mask = attention_mask_4d["full_attention"]
+            attention_mask_4d = {
+                k: v.to(_device) if isinstance(v, torch.Tensor) and v.device != _device else v
+                for k, v in attention_mask_4d.items()
+            }
+            # Keep 2D attention_mask for inner model (get_rope_index etc expect 2D); use 4D only
+            # where we need it (e.g. custom attention). Do not set attention_mask = full_attention here.
+
+        # Inner Qwen2.5-VL expects 2D attention_mask (batch, seq). Pass it as-is.
+        _attention_mask_for_model = attention_mask
 
         inputs_embeds = None
         if (not latent_mode) and ce_patch_pos is not None and ce_patch_vec is not None:
@@ -250,7 +270,7 @@ class LatentQwenVLWrapper(nn.Module):
         outputs = self.model(
             input_ids=None if inputs_embeds is not None else input_ids,
             inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
+            attention_mask=_attention_mask_for_model,
             pixel_values=pixel_values,
             image_grid_thw=image_grid_thw,
             output_hidden_states=(output_hidden_states or latent_mode or ("alignment" in loss_type)),

@@ -50,21 +50,25 @@ def preprocess_sample(
                     seen_assistant_img = True
                     if j > 0 and content[j - 1].get("type") == "text":
                         text_before = content[j - 1].get("text", "")
-                        if "<abs_vis_token></abs_vis_token>" not in text_before:
+                        if "<|vlat_start|><|vlat_end|>" not in text_before:
                             return None
 
             elif item.get("type") == "text" and role == "assistant":
                 text = item.get("text", "")
-                n_img_pad += text.count("<abs_vis_token></abs_vis_token>")
+                n_img_pad += text.count("<|vlat_start|><|vlat_end|>")
 
-                if "<observation>" in text:
+                if "<|refl_start|>" in text:
                     seen_observation = True
 
         data[i]["content"] = content
 
     if n_img != n_img_pad:
         return None
-    if not seen_observation and not allow_no_observation:
+    num_turns = metadata.get("num_turns")
+    needs_observation = (
+        not allow_no_observation and not (isinstance(num_turns, int) and num_turns == 0)
+    )
+    if not seen_observation and needs_observation:
         return None
 
     if "sample_id" not in metadata:

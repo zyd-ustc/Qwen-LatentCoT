@@ -8,11 +8,11 @@ import torch
 
 
 def process_multiple_question_img(question_str: str) -> str:
-    if "<abs_vis_token></abs_vis_token>" in question_str:
+    if "<|vlat_start|><|vlat_end|>" in question_str:
         question_str = question_str.replace(
             "<|vision_start|><|image_pad|><|vision_end|>", ""
         ).replace(
-            "<abs_vis_token></abs_vis_token>",
+            "<|vlat_start|><|vlat_end|>",
             "<|vision_start|><|image_pad|><|vision_end|>",
         )
     return question_str
@@ -21,7 +21,7 @@ def process_multiple_question_img(question_str: str) -> str:
 def replace_latent_placeholder_with_img_pad(
     text: str,
     image_pad: str = "<|vision_start|><|image_pad|><|vision_end|>",
-    latent_placeholder: str = "<abs_vis_token></abs_vis_token>",
+    latent_placeholder: str = "<|vlat_start|><|vlat_end|>",
     sep_token: str = "<|im_start|>assistant",
 ) -> str:
     turns = text.split(sep_token)
@@ -35,7 +35,7 @@ def replace_latent_placeholder_with_img_pad(
 
 
 def replace_img_pad_with_latent_pad(
-    texts: list[str], latent_size: int, latent_pad_str: str = "<abs_vis_token_pad>"
+    texts: list[str], latent_size: int, latent_pad_str: str = "<|vlat_pad|>"
 ) -> list[str]:
     update_texts: list[str] = []
     latent_pad_strs = latent_pad_str * latent_size
@@ -47,7 +47,7 @@ def replace_img_pad_with_latent_pad(
                 "<|im_start|>assistant"
                 + turn.replace(
                     "<|vision_start|><|image_pad|><|vision_end|>",
-                    f"<abs_vis_token>{latent_pad_strs}</abs_vis_token>",
+                    f"<|vlat_start|>{latent_pad_strs}<|vlat_end|>",
                 )
             )
         update_texts.append(updated)
@@ -55,7 +55,7 @@ def replace_img_pad_with_latent_pad(
 
 
 def add_latent_pad_after_auxiliary_img(
-    texts: list[str], latent_size: int, latent_pad_str: str = "<abs_vis_token_pad>"
+    texts: list[str], latent_size: int, latent_pad_str: str = "<|vlat_pad|>"
 ) -> list[str]:
     update_texts: list[str] = []
     latent_pad_strs = latent_pad_str * latent_size
@@ -68,7 +68,7 @@ def add_latent_pad_after_auxiliary_img(
                 + turn.replace(
                     "<|vision_start|><|image_pad|><|vision_end|>",
                     "<|vision_start|><|image_pad|><|vision_end|>"
-                    + f"<abs_vis_token>{latent_pad_strs}</abs_vis_token>",
+                    + f"<|vlat_start|>{latent_pad_strs}<|vlat_end|>",
                 )
             )
         update_texts.append(updated)

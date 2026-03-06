@@ -10,18 +10,18 @@ from qwen_latent_cot.utils.text_ops import (
 def test_replace_latent_placeholder_with_img_pad():
     text = (
         "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>\n"
-        "<|im_start|>assistant\n<abs_vis_token></abs_vis_token><|im_end|>"
+        "<|im_start|>assistant\n<|vlat_start|><|vlat_end|><|im_end|>"
     )
     out = replace_latent_placeholder_with_img_pad(text)
-    assert "<abs_vis_token></abs_vis_token>" not in out
+    assert "<|vlat_start|><|vlat_end|>" not in out
     assert out.count("<|vision_start|><|image_pad|><|vision_end|>") == 2
 
 
 def test_add_latent_pad_after_auxiliary_img():
     text = "<|im_start|>assistant\n<|vision_start|><|image_pad|><|vision_end|>"
     out = add_latent_pad_after_auxiliary_img([text], latent_size=3)[0]
-    assert "<abs_vis_token>" in out
-    assert out.count("<abs_vis_token_pad>") == 3
+    assert "<|vlat_start|>" in out
+    assert out.count("<|vlat_pad|>") == 3
 
 
 def test_generate_labels_after_multi_token_start():

@@ -9,6 +9,8 @@ from qwen_latent_cot.constants import SPECIAL_TOKENS
 
 @dataclass
 class SpecialTokenIds:
+    cort_start: int
+    cort_end: int
     latent_start: int
     latent_end: int
     latent_pad: int
@@ -39,6 +41,8 @@ class SpecialTokenIds:
 def add_latent_special_tokens(processor) -> int:
     tokenizer = processor.tokenizer
     before = len(tokenizer)
+    tokenizer.add_tokens(SPECIAL_TOKENS["cort_start"], special_tokens=True)
+    tokenizer.add_tokens(SPECIAL_TOKENS["cort_end"], special_tokens=True)
     tokenizer.add_tokens(SPECIAL_TOKENS["latent_pad"], special_tokens=True)
     tokenizer.add_tokens(SPECIAL_TOKENS["latent_start"], special_tokens=True)
     tokenizer.add_tokens(SPECIAL_TOKENS["latent_end"], special_tokens=True)
@@ -59,6 +63,8 @@ def resolve_special_token_ids(processor) -> SpecialTokenIds:
     answer_start = tokenizer("<|im_start|>assistant", return_tensors="pt")["input_ids"][0]
 
     return SpecialTokenIds(
+        cort_start=token_id(SPECIAL_TOKENS["cort_start"]),
+        cort_end=token_id(SPECIAL_TOKENS["cort_end"]),
         latent_start=token_id(SPECIAL_TOKENS["latent_start"]),
         latent_end=token_id(SPECIAL_TOKENS["latent_end"]),
         latent_pad=token_id(SPECIAL_TOKENS["latent_pad"]),
@@ -73,6 +79,8 @@ def resolve_special_token_ids(processor) -> SpecialTokenIds:
 
 
 def attach_special_ids_to_model(model, ids: SpecialTokenIds) -> None:
+    model.config.cort_start_id = int(ids.cort_start)
+    model.config.cort_end_id = int(ids.cort_end)
     model.config.latent_token_id = int(ids.latent_pad)
     model.config.latent_start_id = int(ids.latent_start)
     model.config.latent_end_id = int(ids.latent_end)

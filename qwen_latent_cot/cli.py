@@ -8,6 +8,7 @@ import os
 import torch
 from PIL import Image
 
+from qwen_latent_cot.inference.checkpoint_eval import InferCompareConfig, run_infer_compare
 from qwen_latent_cot.inference import ReflectionRegenerationPipeline
 from qwen_latent_cot.models.qwen_image_backend import (
     LocalQwenImageBackend,
@@ -17,9 +18,11 @@ from qwen_latent_cot.models.qwen_image_backend import (
 from qwen_latent_cot.models.reflector import HeuristicReflector, QwenVLReflector
 from qwen_latent_cot.training import (
     PrecomputeConfig,
+    Stage2TrainConfig,
     TrainConfig,
     run_precompute_teacher_latents,
     run_precompute_teacher_reps,
+    run_stage2_training,
     run_training,
 )
 from qwen_latent_cot.utils import build_logger
@@ -59,6 +62,12 @@ def _base_training_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--sft-stage3-img-tokens", type=int, default=2000)
 
     parser.add_argument("--log-file", type=str, default=None)
+    parser.add_argument(
+        "--deepspeed",
+        type=str,
+        default="",
+        help="Optional DeepSpeed config JSON path for ZeRO memory optimization.",
+    )
 
 
 def _add_train_parser(subparsers) -> None:
@@ -66,12 +75,6 @@ def _add_train_parser(subparsers) -> None:
     _base_training_parser(p)
 
     p.add_argument("--stage", type=str, required=True, choices=["stage1-1", "stage1-2", "stage1-3"])
-    p.add_argument(
-        "--deepspeed",
-        type=str,
-        default="",
-        help="Optional DeepSpeed config JSON path (e.g. configs/deepspeed/zero2_bf16.json) to reduce VRAM usage.",
-    )
     p.add_argument("--epochs", type=int, default=1)
     p.add_argument("--grad-accum-steps", type=int, default=1)
     p.add_argument("--learning-rate", type=float, default=1e-5)
@@ -108,6 +111,46 @@ def _add_precompute_parsers(subparsers) -> None:
     )
 
 
+def _add_stage2_train_parser(subparsers) -> None:
+    p = subparsers.add_parser("train-stage2", help="Run stage2 end-to-end generation training")
+    p.add_argument("--qwen-image-model-path", type=str, required=True)
+    p.add_argument("--data-path", type=str, nargs="+", required=True)
+    p.add_argument("--output-dir", type=str, required=True)
+    p.add_argument("--dataset-root", type=str, default="")
+    p.add_argument("--shuffle-train", action="store_true")
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--dtype", type=str, default="bfloat16")
+    p.add_argument("--batch-size", type=int, default=1)
+    p.add_argument("--epochs", type=int, default=1)
+    p.add_argument("--grad-accum-steps", type=int, default=1)
+    p.add_argument("--learning-rate", type=float, default=1e-5)
+    p.add_argument("--warmup-steps", type=int, default=10)
+    p.add_argument("--save-steps", type=int, default=200)
+    p.add_argument("--logging-steps", type=int, default=10)
+    p.add_argument("--save-total-limit", type=int, default=3)
+    p.add_argument("--max-train-steps", type=int, default=0)
+    p.add_argument("--image-size", type=int, default=512)
+
+    p.add_argument("--diffusion-weight", type=float, default=1.0)
+    p.add_argument("--recon-weight", type=float, default=0.1)
+    p.add_argument("--lpips-weight", type=float, default=0.0)
+
+    p.set_defaults(use_prompt=True, use_reflection=True, use_vlat_tokens=True)
+    p.add_argument("--no-use-prompt", action="store_false", dest="use_prompt")
+    p.add_argument("--no-use-reflection", action="store_false", dest="use_reflection")
+    p.add_argument("--no-use-vlat-tokens", action="store_false", dest="use_vlat_tokens")
+    p.add_argument("--latent-token-repeat", type=int, default=8)
+    p.add_argument("--use-prev-image", action="store_true")
+
+    p.add_argument("--log-file", type=str, default=None)
+    p.add_argument(
+        "--deepspeed",
+        type=str,
+        default="",
+        help="Optional DeepSpeed config JSON path for stage2 training.",
+    )
+
+
 def _add_infer_parser(subparsers) -> None:
     p = subparsers.add_parser("infer", help="Run draft->reflection->refine pipeline")
     p.add_argument("--prompt", type=str, required=True)
@@ -134,6 +177,56 @@ def _add_infer_parser(subparsers) -> None:
 
     p.add_argument("--reflector", type=str, default="heuristic", choices=["heuristic", "qwen_vl"])
     p.add_argument("--reflector-model", type=str, default=None)
+    p.add_argument(
+        "--reflector-base-model",
+        type=str,
+        default=None,
+        help="Base Qwen2.5-VL path when --reflector-model points to a stage checkpoint directory.",
+    )
+
+
+def _add_infer_compare_parser(subparsers) -> None:
+    p = subparsers.add_parser(
+        "infer-compare-stages",
+        help="Randomly sample one item and compare untrained/stage1-1/1-2/1-3/stage2 outputs.",
+    )
+    p.add_argument("--data-path", type=str, nargs="+", required=True)
+    p.add_argument("--output-dir", type=str, required=True)
+    p.add_argument(
+        "--stages",
+        type=str,
+        nargs="+",
+        default=["untrained", "stage1-1", "stage1-2", "stage1-3", "stage2"],
+        choices=["untrained", "stage1-1", "stage1-2", "stage1-3", "stage2"],
+        help="Stages to validate. You can pass one or multiple values.",
+    )
+    p.add_argument("--qwen-image-base-model", type=str, default="")
+    p.add_argument("--stage2-checkpoint", type=str, default="")
+    p.add_argument("--reflector-base-model", type=str, default="")
+    p.add_argument("--stage1-1-checkpoint", type=str, default="")
+    p.add_argument("--stage1-2-checkpoint", type=str, default="")
+    p.add_argument("--stage1-3-checkpoint", type=str, default="")
+    p.add_argument("--untrained-reflector-model", type=str, default="")
+    p.add_argument("--stage2-reflector-checkpoint", type=str, default="")
+    p.add_argument(
+        "--sample-seed",
+        type=int,
+        default=None,
+        help="Seed for sample selection. Default None means random each run.",
+    )
+    p.add_argument("--gen-seed", type=int, default=42)
+    p.add_argument(
+        "--sample-source",
+        type=str,
+        default="imgedit",
+        choices=["imgedit", "opengpt4o", "echo4o", "all"],
+        help="Restrict random sample selection by source. Default: imgedit.",
+    )
+    p.add_argument("--num-inference-steps", type=int, default=50)
+    p.add_argument("--guidance-scale", type=float, default=4.0)
+    p.add_argument("--aspect-ratio", type=str, default="1:1")
+    p.add_argument("--dtype", type=str, default="bfloat16")
+    p.add_argument("--init-image", type=str, choices=["zeros", "none"], default="zeros")
 
 
 def _build_image_backend(args):
@@ -162,17 +255,27 @@ def _build_reflector(args):
         if not args.reflector_model:
             raise ValueError("--reflector-model is required for --reflector qwen_vl")
         dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
-        return QwenVLReflector(model_path=args.reflector_model, dtype=dtype)
+        return QwenVLReflector(
+            model_path=args.reflector_model,
+            base_model_path=getattr(args, "reflector_base_model", None),
+            dtype=dtype,
+        )
     raise ValueError(f"Unsupported reflector: {args.reflector}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser("qwen-latent-cot")
+    # DeepSpeed launcher injects --local_rank for each worker process.
+    # Keep it optional/no-op so subcommands remain compatible.
+    parser.add_argument("--local_rank", type=int, default=-1, help=argparse.SUPPRESS)
+    parser.add_argument("--local-rank", type=int, default=-1, dest="local_rank", help=argparse.SUPPRESS)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     _add_infer_parser(subparsers)
+    _add_infer_compare_parser(subparsers)
     _add_train_parser(subparsers)
     _add_precompute_parsers(subparsers)
+    _add_stage2_train_parser(subparsers)
 
     args = parser.parse_args()
 
@@ -201,6 +304,31 @@ def main() -> None:
         logger.info("Saved refined image: %s", result["refined"])
         logger.info("Saved metadata: %s", result["meta"])
         logger.info("Reflection: %s", result["reflection"])
+        return
+
+    if args.command == "infer-compare-stages":
+        cfg = InferCompareConfig(
+            data_paths=args.data_path,
+            output_dir=args.output_dir,
+            stages=args.stages,
+            qwen_image_base_model=args.qwen_image_base_model,
+            stage2_checkpoint=args.stage2_checkpoint,
+            reflector_base_model=args.reflector_base_model,
+            stage1_1_checkpoint=args.stage1_1_checkpoint,
+            stage1_2_checkpoint=args.stage1_2_checkpoint,
+            stage1_3_checkpoint=args.stage1_3_checkpoint,
+            untrained_reflector_model=args.untrained_reflector_model,
+            stage2_reflector_checkpoint=args.stage2_reflector_checkpoint,
+            sample_seed=args.sample_seed,
+            sample_source=args.sample_source,
+            gen_seed=args.gen_seed,
+            num_inference_steps=args.num_inference_steps,
+            guidance_scale=args.guidance_scale,
+            aspect_ratio=args.aspect_ratio,
+            dtype=args.dtype,
+            init_image=args.init_image,
+        )
+        run_infer_compare(cfg)
         return
 
     if args.command == "train":
@@ -257,6 +385,7 @@ def main() -> None:
             output_dir=args.output_dir,
             dataset_root=args.dataset_root,
             qwen_image_edit_root=args.qwen_image_edit_root,
+            deepspeed=args.deepspeed,
             allow_no_observation=args.allow_no_observation,
             shuffle_train=args.shuffle_train,
             seed=args.seed,
@@ -282,6 +411,39 @@ def main() -> None:
             run_precompute_teacher_latents(cfg)
         else:
             run_precompute_teacher_reps(cfg)
+        return
+
+    if args.command == "train-stage2":
+        cfg = Stage2TrainConfig(
+            qwen_image_model_path=args.qwen_image_model_path,
+            data_paths=args.data_path,
+            output_dir=args.output_dir,
+            dataset_root=args.dataset_root,
+            deepspeed=args.deepspeed,
+            seed=args.seed,
+            dtype=args.dtype,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            grad_accum_steps=args.grad_accum_steps,
+            learning_rate=args.learning_rate,
+            warmup_steps=args.warmup_steps,
+            logging_steps=args.logging_steps,
+            save_steps=args.save_steps,
+            save_total_limit=args.save_total_limit,
+            max_train_steps=args.max_train_steps,
+            image_size=args.image_size,
+            diffusion_weight=args.diffusion_weight,
+            recon_weight=args.recon_weight,
+            lpips_weight=args.lpips_weight,
+            use_prompt=args.use_prompt,
+            use_reflection=args.use_reflection,
+            use_vlat_tokens=args.use_vlat_tokens,
+            latent_token_repeat=args.latent_token_repeat,
+            use_prev_image=args.use_prev_image,
+            shuffle_train=args.shuffle_train,
+            log_file=args.log_file,
+        )
+        run_stage2_training(cfg)
         return
 
 

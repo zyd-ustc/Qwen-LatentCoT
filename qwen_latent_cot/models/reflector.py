@@ -15,10 +15,10 @@ class HeuristicReflector:
     """Weight-free fallback reflector for dry runs."""
 
     template: str = (
-        "<observation>"
+        "<|refl_start|>"
         "The draft image may be missing fine-grained details or exact style alignment. "
         "Refine object attributes, spatial relations, and color consistency to better match: {goal}."
-        "</observation>"
+        "<|refl_end|>"
     )
 
     def reflect(self, prompt: str, image: Image.Image) -> str:
@@ -32,18 +32,30 @@ class QwenVLReflector:
     def __init__(
         self,
         model_path: str,
+        base_model_path: str | None = None,
         dtype: torch.dtype = torch.bfloat16,
         max_new_tokens: int = 256,
         temperature: float = 0.7,
+        device: str | None = None,
     ) -> None:
-        from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
+        from qwen_latent_cot.models.loaders import load_qwen2_5_vl
 
-        self.processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True, use_fast=True)
-        self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+        dtype_name = {
+            torch.float16: "float16",
+            torch.bfloat16: "bfloat16",
+            torch.float32: "float32",
+        }.get(dtype, "bfloat16")
+
+        self.processor, self.model = load_qwen2_5_vl(
             model_path,
-            torch_dtype=dtype,
+            dtype=dtype_name,
             trust_remote_code=True,
+            base_model_path=base_model_path,
         )
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.model = self.model.to(device)
+        self.model.eval()
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
 
@@ -78,6 +90,6 @@ class QwenVLReflector:
             decoded = decoded.split("<|im_end|>")[0]
 
         decoded = decoded.strip()
-        if "<observation>" not in decoded:
-            decoded = f"<observation>{decoded}</observation>"
+        if "<|refl_start|>" not in decoded:
+            decoded = f"<|refl_start|>{decoded}<|refl_end|>"
         return decoded

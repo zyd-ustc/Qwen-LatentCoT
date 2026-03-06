@@ -1,11 +1,14 @@
 """Shared constants for Qwen-LatentCoT."""
 
 SPECIAL_TOKENS = {
-    "latent_pad": "<abs_vis_token_pad>",
-    "latent_start": "<abs_vis_token>",
-    "latent_end": "</abs_vis_token>",
-    "observation_start": "<observation>",
-    "observation_end": "</observation>",
+    # CoRT-format special tokens (aligned with SPEC.md).
+    "cort_start": "<|cort_start|>",
+    "cort_end": "<|cort_end|>",
+    "latent_pad": "<|vlat_pad|>",
+    "latent_start": "<|vlat_start|>",
+    "latent_end": "<|vlat_end|>",
+    "observation_start": "<|refl_start|>",
+    "observation_end": "<|refl_end|>",
 }
 
 IGNORE_TOKEN_ID = -100

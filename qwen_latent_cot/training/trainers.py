@@ -115,8 +115,14 @@ class Stage12Trainer(Trainer):
             compute_emphasize_acc=True,
         )
 
-        ce_loss = outputs.loss_dict.get("ce", torch.tensor(0.0, device=outputs.loss.device))
-        al_loss = outputs.loss_dict.get("alignment", torch.tensor(0.0, device=outputs.loss.device))
+        # Device for fallback tensors: avoid outputs.loss.device when loss can be None (e.g. no CE labels).
+        _dev = inputs["input_ids"].device
+        ce_loss = outputs.loss_dict.get("ce")
+        if ce_loss is None:
+            ce_loss = torch.tensor(0.0, device=_dev, dtype=torch.float32)
+        al_loss = outputs.loss_dict.get("alignment")
+        if al_loss is None:
+            al_loss = torch.tensor(0.0, device=_dev, dtype=torch.float32)
 
         alignment_weight = float(getattr(self.args, "alignment_weight", 1.0))
         emphasize_latent_weight = float(getattr(self.args, "emphasize_latent_weight", 1.0))
@@ -130,6 +136,10 @@ class Stage12Trainer(Trainer):
         else:
             loss = ce_loss + alignment_weight * al_loss
 
+        # Ensure we never return None so accelerator.backward(loss) does not get None.
+        if loss is None:
+            loss = torch.tensor(0.0, device=_dev, dtype=torch.float32)
+
         self.ce_cum += float(ce_loss.detach().item())
         self.ce_steps += 1
         self.al_cum += float(al_loss.detach().item())
@@ -140,7 +150,7 @@ class Stage12Trainer(Trainer):
             self.obs_acc_steps += 1
 
         step = int(getattr(self.state, "global_step", 0) or 0)
-        if step % 50 == 0:
+        if step > 0 and step % 200 == 0:
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -231,7 +241,7 @@ class Stage13Trainer(Trainer):
             self.obs_acc_steps += 1
 
         step = int(getattr(self.state, "global_step", 0) or 0)
-        if step > 0 and step % 20 == 0:
+        if step > 0 and step % 100 == 0:
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()

@@ -226,6 +226,8 @@ class StageCollator:
                 self.img_pad_tensor,
                 self.img_start_tensor,
                 self.img_end_tensor,
+                self.latent_start_tensor,
+                self.latent_end_tensor,
                 self.obs_start_tensor,
                 self.obs_end_tensor,
             ],
@@ -239,7 +241,7 @@ class StageCollator:
 
         texts = [self.processor.apply_chat_template(ex, tokenize=False) for ex in data_examples]
         texts = [replace_latent_placeholder_with_img_pad(text) for text in texts]
-        texts = add_latent_pad_after_auxiliary_img(texts, self.cfg.latent_size, "<abs_vis_token_pad>")
+        texts = add_latent_pad_after_auxiliary_img(texts, self.cfg.latent_size, "<|vlat_pad|>")
 
         image_inputs, _ = self._process_vision_info(data_examples)
         if self.cfg.image_resize == "global":
@@ -286,6 +288,7 @@ class StageCollator:
                 ignore_ids=[
                     self.end_pad_tensor,
                     self.latent_pad_tensor,
+                    self.latent_start_tensor,
                     self.latent_end_tensor,
                     self.img_pad_tensor,
                     self.img_start_tensor,
@@ -306,7 +309,7 @@ class StageCollator:
         texts = [replace_latent_placeholder_with_img_pad(text) for text in texts]
 
         student_texts = replace_img_pad_with_latent_pad(
-            texts, self.cfg.latent_size, "<abs_vis_token_pad>"
+            texts, self.cfg.latent_size, "<|vlat_pad|>"
         )
         user_examples = remove_auxiliary_images(data_examples)
 
@@ -356,6 +359,7 @@ class StageCollator:
                 self.img_end_tensor,
                 self.end_pad_tensor,
                 self.latent_pad_tensor,
+                self.latent_start_tensor,
                 self.latent_end_tensor,
                 self.obs_start_tensor,
                 self.obs_end_tensor,

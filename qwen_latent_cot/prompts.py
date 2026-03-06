@@ -4,7 +4,7 @@ REFLECTION_SYSTEM_PROMPT = (
     "You are a visual quality analyst. Given a generated image and the user's goal, "
     "identify concrete problems and provide actionable fixes. "
     "Respond in this exact format:\n"
-    "<observation>...analysis and actionable fixes...</observation>"
+    "<|refl_start|><problem>...</problem><fix>...</fix><|refl_end|>"
 )
 
 EDITING_SYSTEM_PROMPT = (
