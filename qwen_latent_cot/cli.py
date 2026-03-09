@@ -8,8 +8,9 @@ import os
 import torch
 from PIL import Image
 
+from qwen_latent_cot.constants import STAGE_CHOICES
 from qwen_latent_cot.inference.checkpoint_eval import InferCompareConfig, run_infer_compare
-from qwen_latent_cot.inference import ReflectionRegenerationPipeline
+from qwen_latent_cot.inference import AutoRegressiveCoRTGenerator, ReflectionRegenerationPipeline
 from qwen_latent_cot.models.qwen_image_backend import (
     LocalQwenImageBackend,
     MockQwenImageBackend,
@@ -71,10 +72,10 @@ def _base_training_parser(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_train_parser(subparsers) -> None:
-    p = subparsers.add_parser("train", help="Run stage1-1/1-2/1-3 training")
+    p = subparsers.add_parser("train", help="Run stage1-1/1-2/1-3/1-4 training")
     _base_training_parser(p)
 
-    p.add_argument("--stage", type=str, required=True, choices=["stage1-1", "stage1-2", "stage1-3"])
+    p.add_argument("--stage", type=str, required=True, choices=list(STAGE_CHOICES))
     p.add_argument("--epochs", type=int, default=1)
     p.add_argument("--grad-accum-steps", type=int, default=1)
     p.add_argument("--learning-rate", type=float, default=1e-5)
@@ -87,6 +88,7 @@ def _add_train_parser(subparsers) -> None:
     p.add_argument("--alignment-layer", type=str, default="all_layers")
     p.add_argument("--alignment-weight", type=float, default=1.0)
     p.add_argument("--emphasize-latent-weight", type=float, default=1.0)
+    p.add_argument("--stage1-4-structure-ce-weight", type=float, default=1.0)
     p.add_argument("--only-predict-obs", action="store_true")
 
     p.add_argument("--teacher-reps-dir", type=str, default=None)
@@ -185,6 +187,26 @@ def _add_infer_parser(subparsers) -> None:
     )
 
 
+def _add_infer_cort_parser(subparsers) -> None:
+    p = subparsers.add_parser("infer-cort", help="Autoregressively generate CoRT blocks from a stage1-4 model")
+    p.add_argument("--model-path", type=str, required=True)
+    p.add_argument("--prompt", type=str, required=True)
+    p.add_argument("--output-dir", type=str, required=True)
+    p.add_argument("--image", type=str, default=None, help="Optional question image path.")
+    p.add_argument(
+        "--base-model-path",
+        type=str,
+        default=None,
+        help="Base Qwen2.5-VL path when --model-path points to a trainer checkpoint directory.",
+    )
+    p.add_argument("--dtype", type=str, default="bfloat16")
+    p.add_argument("--latent-size", type=int, default=8)
+    p.add_argument("--max-cort-turns", type=int, default=3)
+    p.add_argument("--max-reflection-tokens", type=int, default=128)
+    p.add_argument("--min-reflection-tokens", type=int, default=1)
+    p.add_argument("--temperature", type=float, default=0.0)
+
+
 def _add_infer_compare_parser(subparsers) -> None:
     p = subparsers.add_parser(
         "infer-compare-stages",
@@ -272,6 +294,7 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     _add_infer_parser(subparsers)
+    _add_infer_cort_parser(subparsers)
     _add_infer_compare_parser(subparsers)
     _add_train_parser(subparsers)
     _add_precompute_parsers(subparsers)
@@ -304,6 +327,29 @@ def main() -> None:
         logger.info("Saved refined image: %s", result["refined"])
         logger.info("Saved metadata: %s", result["meta"])
         logger.info("Reflection: %s", result["reflection"])
+        return
+
+    if args.command == "infer-cort":
+        logger = build_logger("qwen_latent_cot.infer_cort")
+        generator = AutoRegressiveCoRTGenerator(
+            model_path=args.model_path,
+            base_model_path=args.base_model_path,
+            dtype=args.dtype,
+            latent_size=args.latent_size,
+            temperature=args.temperature,
+        )
+        question_image = Image.open(args.image).convert("RGB") if args.image else None
+        result = generator.run_and_save(
+            prompt=args.prompt,
+            output_dir=args.output_dir,
+            question_image=question_image,
+            max_cort_turns=args.max_cort_turns,
+            max_reflection_tokens=args.max_reflection_tokens,
+            min_reflection_tokens=args.min_reflection_tokens,
+        )
+        logger.info("Saved CoRT text: %s", result["cort_text"])
+        logger.info("Saved latent blocks: %s", result["latents"])
+        logger.info("Saved metadata: %s", result["meta"])
         return
 
     if args.command == "infer-compare-stages":
@@ -370,6 +416,7 @@ def main() -> None:
             alignment_layer=args.alignment_layer,
             alignment_weight=args.alignment_weight,
             emphasize_latent_weight=args.emphasize_latent_weight,
+            stage1_4_structure_ce_weight=args.stage1_4_structure_ce_weight,
             teacher_reps_dir=args.teacher_reps_dir,
             teacher_latent_dir=args.teacher_latent_dir,
             resume_from_checkpoint=args.resume_from_checkpoint,

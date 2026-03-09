@@ -63,6 +63,9 @@ class StageCollator:
         self.latent_start_tensor = torch.tensor(token_ids.latent_start, dtype=torch.long)
         self.latent_end_tensor = torch.tensor(token_ids.latent_end, dtype=torch.long)
         self.latent_pad_tensor = torch.tensor(token_ids.latent_pad, dtype=torch.long)
+        self.latent_start_seq = torch.tensor([token_ids.latent_start], dtype=torch.long)
+        self.latent_end_seq = torch.tensor([token_ids.latent_end], dtype=torch.long)
+        self.latent_pad_seq = torch.tensor([token_ids.latent_pad], dtype=torch.long)
         # 单 token 需转为 1D，否则 find_subsequence 中 pattern.size(0) 会报错
         self.obs_start_tensor = torch.tensor([token_ids.observation_start], dtype=torch.long)
         self.obs_end_tensor = torch.tensor([token_ids.observation_end], dtype=torch.long)
@@ -271,7 +274,7 @@ class StageCollator:
 
         if self.cfg.sft_stage2_align_poss == "latent_end":
             batch["latent_end_poss"] = find_ids_poss(
-                batch["input_ids"], self.answer_start_tensor, self.latent_end_tensor
+                batch["input_ids"], self.answer_start_tensor, self.latent_end_seq
             )
 
         batch["observation_poss"] = self._obs_positions(batch["input_ids"])
@@ -344,7 +347,7 @@ class StageCollator:
             batch["student_attention_mask_4d"] = {"full_attention": attn_4d}
 
         batch["student_alignment_poss"] = find_ids_poss(
-            batch["student_input_ids"], self.answer_start_tensor, self.latent_pad_tensor
+            batch["student_input_ids"], self.answer_start_tensor, self.latent_pad_seq
         )
         batch["observation_poss"] = self._obs_positions(
             batch["student_input_ids"], end_minus_one=True
@@ -363,6 +366,51 @@ class StageCollator:
                 self.latent_end_tensor,
                 self.obs_start_tensor,
                 self.obs_end_tensor,
+            ],
+        )
+
+        return batch
+
+    def collate_stage1_4(self, examples: list[dict]) -> dict:
+        batch: dict[str, Any] = {}
+        batch["metadata"] = [ex["metadata"] for ex in examples]
+        data_examples = [ex["data"] for ex in examples]
+
+        texts = [self.processor.apply_chat_template(ex, tokenize=False) for ex in data_examples]
+        texts = [replace_latent_placeholder_with_img_pad(text) for text in texts]
+        cort_texts = replace_img_pad_with_latent_pad(texts, self.cfg.latent_size, "<|vlat_pad|>")
+
+        user_examples = remove_auxiliary_images(data_examples)
+        user_image_inputs, _ = self._process_vision_info(user_examples)
+        user_image_inputs, _ = resize_by_token_budget(
+            user_image_inputs,
+            global_max_pixels=self.cfg.sft_stage3_img_tokens * 28 * 28,
+            per_img_max_pixels=self.cfg.sft_stage3_img_tokens * 28 * 28,
+        )
+
+        model_batch = self.processor(
+            text=cort_texts,
+            images=user_image_inputs,
+            return_tensors="pt",
+            padding=True,
+        )
+
+        batch["input_ids"] = model_batch["input_ids"]
+        batch["attention_mask"] = model_batch["attention_mask"]
+        batch["pixel_values"] = model_batch.get("pixel_values")
+        batch["image_grid_thw"] = model_batch.get("image_grid_thw")
+        batch["alignment_poss"] = find_ids_poss(
+            batch["input_ids"], self.answer_start_tensor, self.latent_pad_seq
+        )
+        batch["observation_poss"] = self._obs_positions(batch["input_ids"])
+        batch["labels"] = generate_labels_after_multi_token_start(
+            batch["input_ids"],
+            self.answer_start_tensor,
+            ignore_ids=[
+                self.end_pad_tensor,
+                self.img_pad_tensor,
+                self.img_start_tensor,
+                self.img_end_tensor,
             ],
         )
 

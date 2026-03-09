@@ -14,4 +14,4 @@ SPECIAL_TOKENS = {
 IGNORE_TOKEN_ID = -100
 DEFAULT_DTYPE = "bfloat16"
 
-STAGE_CHOICES = ("stage1-1", "stage1-2", "stage1-3")
+STAGE_CHOICES = ("stage1-1", "stage1-2", "stage1-3", "stage1-4")

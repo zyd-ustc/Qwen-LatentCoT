@@ -1,4 +1,4 @@
-"""Training entry for stage1-1/1-2/1-3."""
+"""Training entry for stage1-1/1-2/1-3/1-4."""
 
 from __future__ import annotations
 
@@ -17,7 +17,12 @@ from qwen_latent_cot.models import (
 )
 from qwen_latent_cot.models.latent_student import LatentQwenVLWrapper, freeze_visual_encoder
 from qwen_latent_cot.models.loaders import load_qwen2_5_vl
-from qwen_latent_cot.training.trainers import Stage11Trainer, Stage12Trainer, Stage13Trainer
+from qwen_latent_cot.training.trainers import (
+    Stage11Trainer,
+    Stage12Trainer,
+    Stage13Trainer,
+    Stage14Trainer,
+)
 from qwen_latent_cot.utils import build_logger, seed_everything
 
 
@@ -107,6 +112,7 @@ class TrainConfig:
     alignment_layer: str = "all_layers"
     alignment_weight: float = 1.0
     emphasize_latent_weight: float = 1.0
+    stage1_4_structure_ce_weight: float = 1.0
     teacher_reps_dir: str | None = None
     teacher_latent_dir: str | None = None
     resume_from_checkpoint: bool = False
@@ -204,6 +210,11 @@ def run_training(cfg: TrainConfig) -> None:
             raise ValueError("stage1-3 requires `teacher_latent_dir`.")
         trainer_cls = Stage13Trainer
         data_collator = collator.collate_stage1_3
+    elif cfg.stage == "stage1-4":
+        if not cfg.teacher_latent_dir:
+            raise ValueError("stage1-4 requires `teacher_latent_dir`.")
+        trainer_cls = Stage14Trainer
+        data_collator = collator.collate_stage1_4
     else:
         raise ValueError(f"Unsupported stage: {cfg.stage}")
 
@@ -233,6 +244,7 @@ def run_training(cfg: TrainConfig) -> None:
     setattr(train_args, "alignment_layer", cfg.alignment_layer)
     setattr(train_args, "alignment_weight", cfg.alignment_weight)
     setattr(train_args, "emphasize_latent_weight", cfg.emphasize_latent_weight)
+    setattr(train_args, "stage1_4_structure_ce_weight", cfg.stage1_4_structure_ce_weight)
     setattr(train_args, "teacher_reps_dir", cfg.teacher_reps_dir)
     setattr(train_args, "teacher_latent_dir", cfg.teacher_latent_dir)
     setattr(train_args, "sft_stage2_align_poss", cfg.sft_stage2_align_poss)

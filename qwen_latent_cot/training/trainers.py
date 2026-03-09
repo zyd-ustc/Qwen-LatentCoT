@@ -263,3 +263,92 @@ class Stage13Trainer(Trainer):
             self.obs_acc_cum = 0.0
             self.obs_acc_steps = 0
         return super().log(merged, start_time)
+
+
+class Stage14Trainer(Trainer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.ce_cum = 0.0
+        self.ce_steps = 0
+        self.al_cum = 0.0
+        self.al_steps = 0
+        self.obs_acc_cum = 0.0
+        self.obs_acc_steps = 0
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        del num_items_in_batch
+
+        teacher_latents = None
+        if float(getattr(self.args, "alignment_weight", 1.0)) != 0:
+            teacher_latents = load_offline_tensor(
+                getattr(self.args, "teacher_latent_dir"),
+                batch_metadata=inputs["metadata"],
+                alignment_layer=getattr(self.args, "alignment_layer", "all_layers"),
+                rep_type="latent",
+                align_poss="obs",
+            )
+
+        loss_type = ["ce"]
+        if teacher_latents is not None:
+            loss_type.append("alignment")
+
+        outputs = model(
+            input_ids=inputs["input_ids"],
+            attention_mask=inputs["attention_mask"],
+            pixel_values=inputs.get("pixel_values"),
+            image_grid_thw=inputs.get("image_grid_thw"),
+            labels=inputs["labels"],
+            latent_mode=False,
+            teacher_hidden_states_for_alignment=teacher_latents,
+            alignment_poss=inputs.get("alignment_poss"),
+            ce_emphasize_poss=inputs.get("observation_poss"),
+            ce_emphasize_factor=float(getattr(self.args, "ce_emphasize_factor", 1.0)),
+            loss_type=loss_type,
+            compute_emphasize_acc=True,
+            attention_mask_4d=inputs.get("attention_mask_4d"),
+        )
+
+        _dev = inputs["input_ids"].device
+        ce_loss = outputs.loss_dict.get("ce")
+        if ce_loss is None:
+            ce_loss = torch.tensor(0.0, device=_dev, dtype=torch.float32)
+        al_loss = outputs.loss_dict.get("alignment")
+        if al_loss is None:
+            al_loss = torch.tensor(0.0, device=_dev, dtype=torch.float32)
+
+        structure_ce_weight = float(getattr(self.args, "stage1_4_structure_ce_weight", 1.0))
+        alignment_weight = float(getattr(self.args, "alignment_weight", 1.0))
+        loss = structure_ce_weight * ce_loss + alignment_weight * al_loss
+
+        self.ce_cum += float(ce_loss.detach().item())
+        self.ce_steps += 1
+        self.al_cum += float(al_loss.detach().item())
+        self.al_steps += 1
+
+        if outputs.mean_emphasize_acc is not None:
+            self.obs_acc_cum += float(outputs.mean_emphasize_acc)
+            self.obs_acc_steps += 1
+
+        step = int(getattr(self.state, "global_step", 0) or 0)
+        if step > 0 and step % 100 == 0:
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        return (loss, outputs) if return_outputs else loss
+
+    def log(self, logs: dict[str, float], start_time: float | None = None) -> None:
+        merged = dict(logs)
+        if self.ce_steps > 0:
+            merged["structure_ce_loss"] = round(self.ce_cum / self.ce_steps, 6)
+            self.ce_cum = 0.0
+            self.ce_steps = 0
+        if self.al_steps > 0:
+            merged["latent_alignment_loss"] = round(self.al_cum / self.al_steps, 6)
+            self.al_cum = 0.0
+            self.al_steps = 0
+        if self.obs_acc_steps > 0:
+            merged["observation_token_acc"] = round(self.obs_acc_cum / self.obs_acc_steps, 6)
+            self.obs_acc_cum = 0.0
+            self.obs_acc_steps = 0
+        return super().log(merged, start_time)
