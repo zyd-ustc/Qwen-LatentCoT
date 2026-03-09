@@ -6,7 +6,7 @@ Qwen-LatentCoT 是一个面向多轮图像编辑/反思数据的训练与推理�
 2. 读图反思（reflection）
 3. 再生成更符合目标的图像（refine）
 
-训练部分按 `Stage1-1 -> Stage1-2 -> Stage1-3` 分阶段推进，并通过两类离线教师信号进行蒸馏：
+训练部分按 `Stage1-1 -> Stage1-2 -> Stage1-3 -> Stage1-4` 分阶段推进，并通过两类离线教师信号进行蒸馏：
 
 - `teacher reps`（中间隐藏状态）
 - `teacher latents`（latent token 对应表征）
@@ -122,6 +122,40 @@ python -m qwen_latent_cot.cli infer-compare-stages \
 - 每个 stage 会分别输出 `draft.png` / `refined.png` / `result.json`
 - 汇总结果写入 `compare_summary.json`
 
+### 4.5 Stage1-4 CoRT 自回归推理
+
+`infer-cort` 用 stage1-4 checkpoint 直接生成一段结构化 CoRT：
+
+- 先输出 `<|cort_start|>`
+- 每轮输出一个固定长度 latent block：`<|vlat_start|><|vlat_pad|>*K<|vlat_end|>`
+- 再输出一段 `<|refl_start|>...<|refl_end|>`
+- 最后输出 `<|cort_end|>`
+
+命令：
+
+```bash
+python -m qwen_latent_cot.cli infer-cort \
+  --model-path ./checkpoints/stage1_4 \
+  --base-model-path /path/to/Qwen2.5-VL-or-Qwen-Image-Edit \
+  --prompt "Turn the scene into a rainy cyberpunk street at night." \
+  --output-dir ./outputs/infer_cort \
+  --latent-size 8 \
+  --max-cort-turns 3 \
+  --max-reflection-tokens 128
+```
+
+输出：
+
+- `cort.txt`：完整 CoRT 文本
+- `latents.pt`：每轮 latent block hidden states 与 reflection
+- `meta.json`：摘要信息
+
+快速校验：
+
+```bash
+bash scripts/infer_cort_validate.sh
+```
+
 ---
 
 ## 5. 训练总览（推荐顺序）
@@ -133,7 +167,8 @@ python -m qwen_latent_cot.cli infer-compare-stages \
 3. `Stage1-2`：CE + representation alignment
 4. `precompute-latent`：离线提取 teacher latent targets
 5. `Stage1-3`：CE + latent alignment
-6. `Stage2`：End-to-end final image generation supervision（Qwen-Image）
+6. `Stage1-4`：CoRT 结构生成 + latent alignment
+7. `Stage2`：End-to-end final image generation supervision（Qwen-Image）
 
 每一步都依赖前一步产物，因此建议严格按顺序执行。
 
@@ -277,7 +312,46 @@ python -m qwen_latent_cot.cli train \
 
 ---
 
-### 6.6 Stage2（End-to-end Generation，监督最终图像）
+### 6.6 Stage1-4（可自回归 CoRT 生成）
+
+命令：
+
+```bash
+python -m qwen_latent_cot.cli train \
+  --stage stage1-4 \
+  --model-path ./checkpoints/stage1_3 \
+  --qwen-image-edit-root /path/to/Qwen-Image-Edit \
+  --data-path /path/to/train.jsonl \
+  --teacher-latent-dir ./artifacts/teacher_latents \
+  --output-dir ./checkpoints/stage1_4 \
+  --stage1-4-structure-ce-weight 1.0 \
+  --alignment-weight 1.0
+```
+
+做什么：
+
+- 删除 assistant 侧真实图像，只保留 question image 和 CoRT token 序列
+- 对完整 CoRT 结构做 CE：
+  - `<|cort_start|> / <|cort_end|>`
+  - `<|vlat_start|><|vlat_pad|>*K<|vlat_end|>`
+  - `<|refl_start|> ... <|refl_end|>`
+- 同时对 `vlat_pad` 对应 hidden states 做 latent alignment
+
+为什么：
+
+- 让模型不再只是“在预留 latent 槽位里写向量”
+- 而是学会自己输出 CoRT 结构，再在结构内部生成 reflection
+- 为 `infer-cort` 提供可控的自回归 rollout 能力
+
+当前实现边界：
+
+- 这是最小可跑版本，先做 teacher-forced CoRT SFT + latent alignment
+- 还没有加入 scheduled sampling / free-running rollout 训练
+- 推理端使用 grammar-constrained decoder 保证 latent block 长度固定
+
+---
+
+### 6.7 Stage2（End-to-end Generation，监督最终图像）
 
 命令：
 
@@ -337,7 +411,8 @@ python -m qwen_latent_cot.cli train-stage2 \
 
 - `--qwen-image-edit-root`：当 `--model-path` 是 stage checkpoint（不含完整 base config）时必填
 - `--teacher-reps-dir`：Stage1-2 必填
-- `--teacher-latent-dir`：Stage1-3 必填
+- `--teacher-latent-dir`：Stage1-3 / Stage1-4 必填
+- `--stage1-4-structure-ce-weight`：控制 CoRT 结构 CE 权重
 - `--sft-stage2-align-poss`：`obs` 或 `latent_end`
 - `--not-use-4d` / `--mask-latent` 等影响注意力可见域
 - `train-stage2` 入口用于最终图像监督，主要参数：
@@ -357,7 +432,10 @@ python -m qwen_latent_cot.cli train-stage2 \
 - `scripts/train_stage1_2.sh`
 - `scripts/precompute_teacher_latents.sh`
 - `scripts/train_stage1_3.sh`
+- `scripts/train_stage1_4.sh`
 - `scripts/train_stage2.sh`
+- `scripts/infer_cort_validate.sh`
+- `scripts/validate_infer_cort.py`
 - `scripts/infer_compare_stages_one_sample.sh`
 
 ---
